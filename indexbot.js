@@ -24,6 +24,8 @@ const client = new Client({
   ],
 });
 
+console.log("🔍 BOT_TOKEN:", process.env.BOT_TOKEN);
+console.log("🔍 CLIENT_ID:", process.env.CLIENT_ID);
 const TOKEN = (process.env.BOT_TOKEN || '').replace(/^"(.*)"$/, '$1');
 const CLIENT_ID = (process.env.CLIENT_ID || '').replace(/^"(.*)"$/, '$1');
 
