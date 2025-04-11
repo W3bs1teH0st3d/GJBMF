@@ -24,8 +24,8 @@ const client = new Client({
   ],
 });
 
-const TOKEN = process.env.BOT_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID; // ID приложения из Developer Portal
+const TOKEN = (process.env.BOT_TOKEN || '').replace(/^"(.*)"$/, '$1');
+const CLIENT_ID = (process.env.CLIENT_ID || '').replace(/^"(.*)"$/, '$1');
 
 // Список админов (начальный админ)
 const adminList = new Set(['979011152795283456']);
