@@ -69,13 +69,13 @@ const updateAdminSettings = async (userId, settings) => {
 
 // Format settings with custom emoji
 const formatSettings = (settings) => {
-  return `<:zerotiss:1360564817907421324> Settings:\n       Text: ${settings.text || 'Not selected'}\n       Delay: ${
+  return `⚙️ Settings:\n       Text: ${settings.text || 'Not selected'}\n       Delay: ${
     settings.delay ? settings.delay / 1000 : 'Not selected'
   } s\n       Count: ${settings.count || 'Not selected'}`;
 };
 
 const formatAdminSettings = (settings) => {
-  return `<:zerotiss:1360564817907421324> Admin Settings:\n       Status: ${settings.status || 'Not selected'}\n       Activity type: ${
+  return `⚙️ Admin Settings:\n       Status: ${settings.status || 'Not selected'}\n       Activity type: ${
     settings.activityType || 'Not selected'
   }\n       Activity text: ${settings.activityText || 'Not selected'}\n       Emoji: ${
     settings.emoji || 'Not selected'
