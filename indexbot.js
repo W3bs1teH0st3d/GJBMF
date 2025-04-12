@@ -22,6 +22,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers,
   ],
 });
 
@@ -69,20 +70,70 @@ const updateAdminSettings = async (userId, settings) => {
 
 // Format settings with custom emoji
 const formatSettings = (settings) => {
-  return `⚙️ Settings:\n       Text: ${settings.text || 'Not selected'}\n       Delay: ${
+  return `<:zerotiss:1360564817907421324> Settings:\n       Text: ${settings.text || 'Not selected'}\n       Delay: ${
     settings.delay ? settings.delay / 1000 : 'Not selected'
-  } s\n       Count: ${settings.count || 'Not selected'}`;
+  } s\n       Count: ${settings.count || 'Not selected'}\n       Where: ${settings.where || 'Not selected'}${
+    settings.where === 'dms' ? `\n       User ID: ${settings.userId || 'Not selected'}` : ''
+  }`;
 };
 
 const formatAdminSettings = (settings) => {
-  return `⚙️ Admin Settings:\n       Status: ${settings.status || 'Not selected'}\n       Activity type: ${
+  return `<:zerotiss:1360564817907421324> Admin Settings:\n       Status: ${settings.status || 'Not selected'}\n       Activity type: ${
     settings.activityType || 'Not selected'
   }\n       Activity text: ${settings.activityText || 'Not selected'}\n       Emoji: ${
     settings.emoji || 'Not selected'
   }`;
 };
 
-// Optimized async message sending
+// Create DM channel for a user
+const createDMChannel = async (rest, userId, client) => {
+  // Попробовать через авторизованные приложения (REST API)
+  try {
+    console.log(`Attempting to create DM channel via REST API for user ${userId}`);
+    const dmChannel = await rest.post(Routes.userChannels(), {
+      body: { recipient_id: userId },
+    });
+    if (!dmChannel.id) throw new Error('Failed to retrieve DM channel ID');
+    console.log(`DM channel created via REST API: ${dmChannel.id}`);
+    return dmChannel.id;
+  } catch (error) {
+    console.error(`REST API DM creation failed for user ${userId}:`, error);
+    console.error(`Error code: ${error.code}, message: ${error.message}`);
+  }
+
+  // Попробовать через общий сервер
+  try {
+    console.log(`Checking guilds for user ${userId}`);
+    for (const guild of client.guilds.cache.values()) {
+      const member = await guild.members.fetch(userId).catch(() => null);
+      if (member) {
+        const dmChannel = await member.createDM();
+        if (!dmChannel.id) throw new Error('Failed to create DM channel via server');
+        console.log(`DM channel created via guild ${guild.id}: ${dmChannel.id}`);
+        return dmChannel.id;
+      }
+    }
+  } catch (error) {
+    console.error(`Server DM creation failed for user ${userId}:`, error);
+  }
+
+  // Попробовать через client.users.fetch как запасной вариант
+  try {
+    console.log(`Attempting to fetch user ${userId} directly`);
+    const user = await client.users.fetch(userId);
+    const dmChannel = await user.createDM();
+    if (!dmChannel.id) throw new Error('Failed to create DM channel via user fetch');
+    console.log(`DM channel created via user fetch: ${dmChannel.id}`);
+    return dmChannel.id;
+  } catch (error) {
+    console.error(`User fetch DM creation failed for user ${userId}:`, error);
+  }
+
+  // Если все методы не сработали
+  throw new Error('User not found or message cannot be delivered.');
+};
+
+// Optimized async message sending for chat
 const sendMessage = async (rest, interactionToken, channelId, content, replyMessageId) => {
   try {
     await rest.post(Routes.webhook(CLIENT_ID, interactionToken), {
@@ -93,6 +144,24 @@ const sendMessage = async (rest, interactionToken, channelId, content, replyMess
           : undefined,
         flags: 0,
       },
+    });
+    return true;
+  } catch (error) {
+    if (error.code === 429) {
+      const retryAfter = error.retry_after || 500;
+      await new Promise((resolve) => setTimeout(resolve, retryAfter));
+      return false;
+    }
+    throw error;
+  }
+};
+
+// Message sending for DMs
+const sendMessageDM = async (rest, channelId, content) => {
+  if (!channelId) throw new Error('Channel ID is undefined');
+  try {
+    await rest.post(Routes.channelMessages(channelId), {
+      body: { content },
     });
     return true;
   } catch (error) {
@@ -117,6 +186,16 @@ client.once('ready', async () => {
     .setIntegrationTypes([1]) // User Install
     .addStringOption((option) =>
       option.setName('text').setDescription('Text for spam').setRequired(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName('where')
+        .setDescription('Where to send messages: chat or dms')
+        .setRequired(true)
+        .addChoices(
+          { name: 'Chat', value: 'chat' },
+          { name: 'DMs', value: 'dms' }
+        )
     );
 
   const adminCommand = new SlashCommandBuilder()
@@ -149,6 +228,47 @@ client.once('ready', async () => {
   }
 });
 
+// Show settings menu
+const showSettingsMenu = async (interaction, settings) => {
+  const delayMenu = new StringSelectMenuBuilder()
+    .setCustomId('select_delay')
+    .setPlaceholder(settings.delay ? `${settings.delay / 1000}s` : 'Select delay')
+    .addOptions(
+      new StringSelectMenuOptionBuilder().setLabel('0.5s').setValue('500'),
+      new StringSelectMenuOptionBuilder().setLabel('1s').setValue('1000'),
+      new StringSelectMenuOptionBuilder().setLabel('1.5s').setValue('1500'),
+      new StringSelectMenuOptionBuilder().setLabel('2s').setValue('2000'),
+      new StringSelectMenuOptionBuilder().setLabel('3s').setValue('3000'),
+      new StringSelectMenuOptionBuilder().setLabel('5s').setValue('5000')
+    );
+
+  const countMenu = new StringSelectMenuBuilder()
+    .setCustomId('select_count')
+    .setPlaceholder(settings.count ? `${settings.count}` : 'Select count')
+    .addOptions(
+      new StringSelectMenuOptionBuilder().setLabel('1').setValue('1'),
+      new StringSelectMenuOptionBuilder().setLabel('2').setValue('2'),
+      new StringSelectMenuOptionBuilder().setLabel('3').setValue('3'),
+      new StringSelectMenuOptionBuilder().setLabel('4').setValue('4'),
+      new StringSelectMenuOptionBuilder().setLabel('5').setValue('5'),
+    );
+
+  const startButton = new ButtonBuilder()
+    .setCustomId('start_flood')
+    .setLabel('Start Flood')
+    .setStyle(ButtonStyle.Primary);
+
+  const row1 = new ActionRowBuilder().addComponents(delayMenu);
+  const row2 = new ActionRowBuilder().addComponents(countMenu);
+  const row3 = new ActionRowBuilder().addComponents(startButton);
+
+  await interaction.reply({
+    content: formatSettings(settings),
+    components: [row1, row2, row3],
+    flags: 1 << 6, // Ephemeral
+  });
+};
+
 // Handle interactions
 client.on('interactionCreate', async (interaction) => {
   if (
@@ -162,59 +282,73 @@ client.on('interactionCreate', async (interaction) => {
   // Handle /lame command
   if (interaction.isCommand() && interaction.commandName === 'lame') {
     const text = interaction.options.getString('text');
+    const where = interaction.options.getString('where');
 
     let settings = client.floodSettings.get(interaction.user.id) || {
       delay: null,
       count: null,
+      userId: null,
+      where: null,
+      text: null,
     };
 
     settings = {
       ...settings,
       text,
-      replyTo: 'invisible', // Static setting
-      channelId: interaction.channelId,
+      where,
+      replyTo: where === 'chat' ? 'invisible' : null,
+      channelId: where === 'chat' ? interaction.channelId : null,
       interactionToken: interaction.token,
     };
 
     await updateFloodSettings(interaction.user.id, settings);
 
-    const delayMenu = new StringSelectMenuBuilder()
-      .setCustomId('select_delay')
-      .setPlaceholder(settings.delay ? `${settings.delay / 1000}s` : 'Select delay')
-      .addOptions(
-        new StringSelectMenuOptionBuilder().setLabel('0.5s').setValue('500'),
-        new StringSelectMenuOptionBuilder().setLabel('1s').setValue('1000'),
-        new StringSelectMenuOptionBuilder().setLabel('1.5s').setValue('1500'),
-        new StringSelectMenuOptionBuilder().setLabel('2s').setValue('2000'),
-        new StringSelectMenuOptionBuilder().setLabel('3s').setValue('3000'),
-        new StringSelectMenuOptionBuilder().setLabel('5s').setValue('5000')
-      );
+    if (where === 'dms') {
+      const modal = new ModalBuilder()
+        .setCustomId('user_id_modal')
+        .setTitle('Enter User ID');
 
-    const countMenu = new StringSelectMenuBuilder()
-      .setCustomId('select_count')
-      .setPlaceholder(settings.count ? `${settings.count}` : 'Select count')
-      .addOptions(
-        new StringSelectMenuOptionBuilder().setLabel('1').setValue('1'),
-        new StringSelectMenuOptionBuilder().setLabel('2').setValue('2'),
-        new StringSelectMenuOptionBuilder().setLabel('3').setValue('3'),
-        new StringSelectMenuOptionBuilder().setLabel('4').setValue('4'),
-        new StringSelectMenuOptionBuilder().setLabel('5').setValue('5'),
-      );
+      const userIdInput = new TextInputBuilder()
+        .setCustomId('user_id')
+        .setLabel('User ID to send DMs to')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder('Enter a valid user ID (e.g., 123456789012345678)')
+        .setRequired(true);
 
-    const startButton = new ButtonBuilder()
-      .setCustomId('start_flood')
-      .setLabel('Start Flood')
-      .setStyle(ButtonStyle.Primary);
+      const row = new ActionRowBuilder().addComponents(userIdInput);
+      modal.addComponents(row);
 
-    const row1 = new ActionRowBuilder().addComponents(delayMenu);
-    const row2 = new ActionRowBuilder().addComponents(countMenu);
-    const row3 = new ActionRowBuilder().addComponents(startButton);
+      await interaction.showModal(modal);
+    } else {
+      await showSettingsMenu(interaction, settings);
+    }
+  }
 
-    await interaction.reply({
-      content: formatSettings(settings),
-      components: [row1, row2, row3],
-      ephemeral: true,
-    });
+  // Handle user_id modal for DMs
+  if (interaction.isModalSubmit() && interaction.customId === 'user_id_modal') {
+    const userId = interaction.fields.getTextInputValue('user_id');
+
+    if (!/^\d{17,19}$/.test(userId)) {
+      await interaction.reply({
+        content: 'Error: Invalid User ID! Please enter a valid Discord User ID.',
+        flags: 1 << 6, // Ephemeral
+      });
+      return;
+    }
+
+    let settings = client.floodSettings.get(interaction.user.id);
+    if (!settings) {
+      await interaction.reply({
+        content: 'Error: Settings not found. Please restart the command.',
+        flags: 1 << 6, // Ephemeral
+      });
+      return;
+    }
+
+    settings.userId = userId;
+    await updateFloodSettings(interaction.user.id, settings);
+
+    await showSettingsMenu(interaction, settings);
   }
 
   // Handle /admin command
@@ -222,7 +356,7 @@ client.on('interactionCreate', async (interaction) => {
     if (!adminList.has(interaction.user.id)) {
       await interaction.reply({
         content: 'Error: No access!',
-        ephemeral: true,
+        flags: 1 << 6, // Ephemeral
       });
       return;
     }
@@ -235,7 +369,7 @@ client.on('interactionCreate', async (interaction) => {
       if (!/^\d{17,19}$/.test(userId)) {
         await interaction.reply({
           content: 'Error: Invalid user ID!',
-          ephemeral: true,
+          flags: 1 << 6, // Ephemeral
         });
         return;
       }
@@ -243,7 +377,7 @@ client.on('interactionCreate', async (interaction) => {
       if (adminList.has(userId)) {
         await interaction.reply({
           content: `User ID ${userId} is already an admin`,
-          ephemeral: true,
+          flags: 1 << 6, // Ephemeral
         });
         return;
       }
@@ -251,7 +385,7 @@ client.on('interactionCreate', async (interaction) => {
       adminList.add(userId);
       await interaction.reply({
         content: `Added user ID ${userId} as admin`,
-        ephemeral: true,
+        flags: 1 << 6, // Ephemeral
       });
       return;
     }
@@ -309,7 +443,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply({
         content: formatAdminSettings(settings),
         components: [row1, row2, row3, row4],
-        ephemeral: true,
+        flags: 1 << 6, // Ephemeral
       });
     }
   }
@@ -366,7 +500,7 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.reply({
       content: formatAdminSettings(settings),
       components: [row1, row2, row3, row4],
-      ephemeral: true,
+      flags: 1 << 6, // Ephemeral
     });
   }
 
@@ -374,13 +508,20 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isStringSelectMenu() && interaction.customId === 'select_delay') {
     const delay = parseInt(interaction.values[0]);
     const settings = client.floodSettings.get(interaction.user.id);
+    if (!settings) {
+      await interaction.reply({
+        content: 'Error: Settings not found. Please restart the command.',
+        flags: 1 << 6, // Ephemeral
+      });
+      return;
+    }
     settings.delay = delay;
     await updateFloodSettings(interaction.user.id, settings);
 
     await interaction.update({
       content: formatSettings(settings),
       components: interaction.message.components,
-      ephemeral: true,
+      flags: 1 << 6, // Ephemeral
     });
   }
 
@@ -388,13 +529,20 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isStringSelectMenu() && interaction.customId === 'select_count') {
     const count = parseInt(interaction.values[0]);
     const settings = client.floodSettings.get(interaction.user.id);
+    if (!settings) {
+      await interaction.reply({
+        content: 'Error: Settings not found. Please restart the command.',
+        flags: 1 << 6, // Ephemeral
+      });
+      return;
+    }
     settings.count = count;
     await updateFloodSettings(interaction.user.id, settings);
 
     await interaction.update({
       content: formatSettings(settings),
       components: interaction.message.components,
-      ephemeral: true,
+      flags: 1 << 6, // Ephemeral
     });
   }
 
@@ -409,7 +557,7 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.update({
       content: formatAdminSettings(settings),
       components: interaction.message.components,
-      ephemeral: true,
+      flags: 1 << 6, // Ephemeral
     });
   }
 
@@ -449,7 +597,7 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.update({
       content: formatAdminSettings(settings),
       components: interaction.message.components,
-      ephemeral: true,
+      flags: 1 << 6, // Ephemeral
     });
   }
 
@@ -462,7 +610,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.update({
         content: `${formatAdminSettings(settings)}\nError: Please select all settings!`,
         components: interaction.message.components,
-        ephemeral: true,
+        flags: 1 << 6, // Ephemeral
       });
       return;
     }
@@ -483,13 +631,13 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.update({
         content: `${formatAdminSettings(settings)}\nSettings applied successfully`,
         components: [],
-        ephemeral: true,
+        flags: 1 << 6, // Ephemeral
       });
     } catch (error) {
       await interaction.update({
         content: `${formatAdminSettings(settings)}\nError: ${error.message}`,
         components: interaction.message.components,
-        ephemeral: true,
+        flags: 1 << 6, // Ephemeral
       });
       return;
     }
@@ -501,32 +649,70 @@ client.on('interactionCreate', async (interaction) => {
   // Handle flood start for /lame
   if (interaction.isButton() && interaction.customId === 'start_flood') {
     const settings = client.floodSettings.get(interaction.user.id);
+    if (!settings) {
+      await interaction.reply({
+        content: 'Error: Settings not found. Please restart the command.',
+        flags: 1 << 6, // Ephemeral
+      });
+      return;
+    }
 
     if (!settings.delay || !settings.count) {
       await interaction.update({
         content: `${formatSettings(settings)}\nError: Please select all settings!`,
         components: interaction.message.components,
-        ephemeral: true,
+        flags: 1 << 6, // Ephemeral
       });
       return;
     }
 
-    const { text, delay, count, replyTo, channelId, interactionToken } = settings;
+    if (settings.where === 'dms' && !settings.userId) {
+      await interaction.update({
+        content: `${formatSettings(settings)}\nError: User ID is required for DMs!`,
+        components: [],
+        flags: 1 << 6, // Ephemeral
+      });
+      return;
+    }
+
+    const { text, delay, count, where, userId, channelId: initialChannelId, interactionToken } = settings;
+    let channelId = initialChannelId;
+    let replyMessageId = where === 'chat' ? interaction.message.id : null;
+
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
+
+    // For DMs, create or get DM channel for the specified user
+    if (where === 'dms') {
+      try {
+        channelId = await createDMChannel(rest, userId, client);
+        settings.channelId = channelId;
+        await updateFloodSettings(interaction.user.id, settings);
+      } catch (error) {
+        await interaction.update({
+          content: `${formatSettings(settings)}\nError: ${error.message}`,
+          components: [],
+          flags: 1 << 6, // Ephemeral
+        });
+        return;
+      }
+    }
 
     await interaction.update({
       content: `${formatSettings(settings)}\nSpamming...`,
       components: [],
-      ephemeral: true,
+      flags: 1 << 6, // Ephemeral
     });
 
-    const rest = new REST({ version: '10' }).setToken(TOKEN);
     let sentCount = 0;
     let followUpCount = 0;
-    const replyMessageId = interaction.message.id; // Always invisible
 
     // Parallel message sending
     const sendBatch = async (batch) => {
-      const promises = batch.map(() => sendMessage(rest, interactionToken, channelId, text, replyMessageId));
+      const promises = batch.map(() =>
+        where === 'chat'
+          ? sendMessage(rest, interactionToken, channelId, text, replyMessageId)
+          : sendMessageDM(rest, channelId, text)
+      );
       const results = await Promise.all(promises);
       return results.filter((success) => success).length;
     };
@@ -546,7 +732,7 @@ client.on('interactionCreate', async (interaction) => {
         if (followUpCount < 5) {
           await interaction.followUp({
             content: `${formatSettings(settings)}\nError: ${error.message}`,
-            ephemeral: true,
+            flags: 1 << 6, // Ephemeral
           });
           followUpCount++;
         }
@@ -557,7 +743,7 @@ client.on('interactionCreate', async (interaction) => {
     if (followUpCount < 5) {
       await interaction.followUp({
         content: `${formatSettings(settings)}\nSpam completed: Sent ${sentCount} messages`,
-        ephemeral: true,
+        flags: 1 << 6, // Ephemeral
       });
     } else {
       console.log('Follow-up limit reached, skipping completion message');
