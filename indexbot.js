@@ -15,6 +15,7 @@ const {
   Routes,
   ActivityType,
 } = require('discord.js');
+const fs = require('fs-extra');
 
 const client = new Client({
   intents: [
@@ -24,81 +25,115 @@ const client = new Client({
   ],
 });
 
-console.log("🔍 BOT_TOKEN:", process.env.BOT_TOKEN);
-console.log("🔍 CLIENT_ID:", process.env.CLIENT_ID);
 const TOKEN = (process.env.BOT_TOKEN || '').replace(/^"(.*)"$/, '$1');
 const CLIENT_ID = (process.env.CLIENT_ID || '').replace(/^"(.*)"$/, '$1');
 
-// Список админов (начальный админ)
+// List of admins
 const adminList = new Set(['979011152795283456']);
 
-// Проверка переменных окружения
+// Check environment variables
 if (!TOKEN || !CLIENT_ID) {
-  console.error('Ошибка: BOT_TOKEN или CLIENT_ID не указаны в .env!');
+  console.error('Error: BOT_TOKEN or CLIENT_ID not specified in .env!');
   process.exit(1);
 }
 
-// Helper function to format settings display for /lame
+// Settings storage
+const floodSettingsFile = './floodSettings.json';
+const adminSettingsFile = './adminSettings.json';
+
+const loadSettings = async (file) => {
+  try {
+    return await fs.readJson(file);
+  } catch (error) {
+    return {};
+  }
+};
+
+const saveSettings = async (file, data) => {
+  try {
+    await fs.writeJson(file, data);
+  } catch (error) {
+    console.error('Error saving settings:', error);
+  }
+};
+
+const updateFloodSettings = async (userId, settings) => {
+  client.floodSettings.set(userId, settings);
+  await saveSettings(floodSettingsFile, Object.fromEntries(client.floodSettings));
+};
+
+const updateAdminSettings = async (userId, settings) => {
+  client.adminSettings.set(userId, settings);
+  await saveSettings(adminSettingsFile, Object.fromEntries(client.adminSettings));
+};
+
+// Format settings with custom emoji
 const formatSettings = (settings) => {
-  return `Settings:\nText: ${settings.text || 'Not selected'}\nDelay: ${
+  return `<:zerotiss:1360564817907421324> Settings:\n       Text: ${settings.text || 'Not selected'}\n       Delay: ${
     settings.delay ? settings.delay / 1000 : 'Not selected'
-  } s\nCount: ${settings.count || 'Not selected'}\nAnswer to: ${
-    settings.replyTo === 'invisible'
-      ? 'Hide name'
-      : settings.replyTo === 'custom' && settings.customMessageId
-      ? settings.customMessageId
-      : 'Not selected'
+  } s\n       Count: ${settings.count || 'Not selected'}`;
+};
+
+const formatAdminSettings = (settings) => {
+  return `<:zerotiss:1360564817907421324> Admin Settings:\n       Status: ${settings.status || 'Not selected'}\n       Activity type: ${
+    settings.activityType || 'Not selected'
+  }\n       Activity text: ${settings.activityText || 'Not selected'}\n       Emoji: ${
+    settings.emoji || 'Not selected'
   }`;
 };
 
-// Helper function to format admin settings display
-const formatAdminSettings = (settings) => {
-  return `Настройки админа:\nСтатус: ${settings.status || 'Не выбрано'}\nТип активности: ${
-    settings.activityType || 'Не выбрано'
-  }\nТекст активности: ${settings.activityText || 'Не выбрано'}\nЭмодзи: ${settings.emoji || 'Не выбрано'}`;
+// Optimized async message sending
+const sendMessage = async (rest, interactionToken, channelId, content, replyMessageId) => {
+  try {
+    await rest.post(Routes.webhook(CLIENT_ID, interactionToken), {
+      body: {
+        content,
+        message_reference: replyMessageId
+          ? { message_id: replyMessageId, channel_id: channelId, fail_if_not_exists: false }
+          : undefined,
+        flags: 0,
+      },
+    });
+    return true;
+  } catch (error) {
+    if (error.code === 429) {
+      const retryAfter = error.retry_after || 500;
+      await new Promise((resolve) => setTimeout(resolve, retryAfter));
+      return false;
+    }
+    throw error;
+  }
 };
 
-// Регистрация глобальных слеш-команд
+// Register slash commands
 client.once('ready', async () => {
-  console.log(`Залогинился как ${client.user.tag}`);
+  console.log(`Logged in as ${client.user.tag}`);
+  client.floodSettings = new Map(Object.entries(await loadSettings(floodSettingsFile)));
+  client.adminSettings = new Map(Object.entries(await loadSettings(adminSettingsFile)));
 
   const floodCommand = new SlashCommandBuilder()
     .setName('lame')
-    .setDescription('Settings spam')
+    .setDescription('Configure spam settings')
+    .setIntegrationTypes([1]) // User Install
     .addStringOption((option) =>
-      option
-        .setName('text')
-        .setDescription('Spam text')
-        .setRequired(true)
-    )
-    .addStringOption((option) =>
-      option
-        .setName('reply_to')
-        .setDescription('Message ID responde')
-        .setRequired(true)
-        .addChoices(
-          { name: 'Hide name', value: 'invisible' },
-          { name: 'Custom ID', value: 'custom' }
-        )
+      option.setName('text').setDescription('Text for spam').setRequired(true)
     );
 
   const adminCommand = new SlashCommandBuilder()
     .setName('admin')
-    .setDescription('ONLY ADMIN')
-    .setDefaultMemberPermissions(0) // Ограничиваем доступ
+    .setDescription('Admin-only commands')
+    .setIntegrationTypes([1]) // User Install
+    .setDefaultMemberPermissions(0)
     .addSubcommand((subcommand) =>
       subcommand
         .setName('add')
-        .setDescription('Add admin')
+        .setDescription('Add a new admin')
         .addStringOption((option) =>
-          option
-            .setName('user_id')
-            .setDescription('Add admin')
-            .setRequired(true)
+          option.setName('user_id').setDescription('User ID to add').setRequired(true)
         )
     )
     .addSubcommand((subcommand) =>
-      subcommand.setName('settings').setDescription('Change status')
+      subcommand.setName('settings').setDescription('Change bot status')
     );
 
   const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -106,14 +141,15 @@ client.once('ready', async () => {
     await rest.put(Routes.applicationCommands(CLIENT_ID), {
       body: [floodCommand.toJSON(), adminCommand.toJSON()],
     });
-    console.log('command registered');
+    console.log('Slash commands registered successfully');
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error registering commands:', error.message);
+    console.error('Check if BOT_TOKEN and CLIENT_ID are correct and if the bot has permission to register commands.');
     process.exit(1);
   }
 });
 
-// Обработка взаимодействий
+// Handle interactions
 client.on('interactionCreate', async (interaction) => {
   if (
     !interaction.isCommand() &&
@@ -126,59 +162,48 @@ client.on('interactionCreate', async (interaction) => {
   // Handle /lame command
   if (interaction.isCommand() && interaction.commandName === 'lame') {
     const text = interaction.options.getString('text');
-    const replyTo = interaction.options.getString('reply_to');
 
-    if (replyTo === 'custom') {
-      const modal = new ModalBuilder()
-        .setCustomId('custom_message_id')
-        .setTitle('Message ID');
-
-      const messageIdInput = new TextInputBuilder()
-        .setCustomId('message_id')
-        .setLabel('Message ID to responde')
-        .setStyle(TextInputStyle.Short)
-        .setPlaceholder('123456789012345678')
-        .setRequired(true);
-
-      const row = new ActionRowBuilder().addComponents(messageIdInput);
-      modal.addComponents(row);
-
-      await interaction.showModal(modal);
-      return;
-    }
-
-    interaction.client.floodSettings = interaction.client.floodSettings || new Map();
-    interaction.client.floodSettings.set(interaction.user.id, {
-      text,
-      replyTo,
+    let settings = client.floodSettings.get(interaction.user.id) || {
       delay: null,
       count: null,
-      customMessageId: null,
+    };
+
+    settings = {
+      ...settings,
+      text,
+      replyTo: 'invisible', // Static setting
       channelId: interaction.channelId,
       interactionToken: interaction.token,
-    });
+    };
+
+    await updateFloodSettings(interaction.user.id, settings);
 
     const delayMenu = new StringSelectMenuBuilder()
       .setCustomId('select_delay')
-      .setPlaceholder('select delay')
+      .setPlaceholder(settings.delay ? `${settings.delay / 1000}s` : 'Select delay')
       .addOptions(
+        new StringSelectMenuOptionBuilder().setLabel('0.5s').setValue('500'),
         new StringSelectMenuOptionBuilder().setLabel('1s').setValue('1000'),
+        new StringSelectMenuOptionBuilder().setLabel('1.5s').setValue('1500'),
         new StringSelectMenuOptionBuilder().setLabel('2s').setValue('2000'),
+        new StringSelectMenuOptionBuilder().setLabel('3s').setValue('3000'),
         new StringSelectMenuOptionBuilder().setLabel('5s').setValue('5000')
       );
 
     const countMenu = new StringSelectMenuBuilder()
       .setCustomId('select_count')
-      .setPlaceholder('select count')
+      .setPlaceholder(settings.count ? `${settings.count}` : 'Select count')
       .addOptions(
         new StringSelectMenuOptionBuilder().setLabel('1').setValue('1'),
+        new StringSelectMenuOptionBuilder().setLabel('2').setValue('2'),
         new StringSelectMenuOptionBuilder().setLabel('3').setValue('3'),
-        new StringSelectMenuOptionBuilder().setLabel('5').setValue('5')
+        new StringSelectMenuOptionBuilder().setLabel('4').setValue('4'),
+        new StringSelectMenuOptionBuilder().setLabel('5').setValue('5'),
       );
 
     const startButton = new ButtonBuilder()
       .setCustomId('start_flood')
-      .setLabel('Fl00d')
+      .setLabel('Start Flood')
       .setStyle(ButtonStyle.Primary);
 
     const row1 = new ActionRowBuilder().addComponents(delayMenu);
@@ -186,9 +211,9 @@ client.on('interactionCreate', async (interaction) => {
     const row3 = new ActionRowBuilder().addComponents(startButton);
 
     await interaction.reply({
-      content: formatSettings(interaction.client.floodSettings.get(interaction.user.id)),
+      content: formatSettings(settings),
       components: [row1, row2, row3],
-      flags: 64,
+      ephemeral: true,
     });
   }
 
@@ -197,7 +222,7 @@ client.on('interactionCreate', async (interaction) => {
     if (!adminList.has(interaction.user.id)) {
       await interaction.reply({
         content: 'Error: No access!',
-        flags: 64,
+        ephemeral: true,
       });
       return;
     }
@@ -209,65 +234,66 @@ client.on('interactionCreate', async (interaction) => {
 
       if (!/^\d{17,19}$/.test(userId)) {
         await interaction.reply({
-          content: 'Error: incorrect ID',
-          flags: 64,
+          content: 'Error: Invalid user ID!',
+          ephemeral: true,
         });
         return;
       }
 
       if (adminList.has(userId)) {
         await interaction.reply({
-          content: `=ID ${userId} already admin`,
-          flags: 64,
+          content: `User ID ${userId} is already an admin`,
+          ephemeral: true,
         });
         return;
       }
 
       adminList.add(userId);
       await interaction.reply({
-        content: `Added ${userId} admin`,
-        flags: 64,
+        content: `Added user ID ${userId} as admin`,
+        ephemeral: true,
       });
       return;
     }
 
     if (subcommand === 'settings') {
-      interaction.client.adminSettings = interaction.client.adminSettings || new Map();
-      interaction.client.adminSettings.set(interaction.user.id, {
+      let settings = client.adminSettings.get(interaction.user.id) || {
         status: null,
         activityType: null,
         activityText: null,
         emoji: null,
-      });
+      };
+
+      await updateAdminSettings(interaction.user.id, settings);
 
       const statusMenu = new StringSelectMenuBuilder()
         .setCustomId('select_status')
-        .setPlaceholder('select status')
+        .setPlaceholder('Select status')
         .addOptions(
-          new StringSelectMenuOptionBuilder().setLabel('Онлайн').setValue('online'),
-          new StringSelectMenuOptionBuilder().setLabel('Оффлайн').setValue('offline'),
-          new StringSelectMenuOptionBuilder().setLabel('Не беспокоить').setValue('dnd'),
-          new StringSelectMenuOptionBuilder().setLabel('Невидимый').setValue('invisible')
+          new StringSelectMenuOptionBuilder().setLabel('Online').setValue('online'),
+          new StringSelectMenuOptionBuilder().setLabel('Offline').setValue('offline'),
+          new StringSelectMenuOptionBuilder().setLabel('Do Not Disturb').setValue('dnd'),
+          new StringSelectMenuOptionBuilder().setLabel('Invisible').setValue('invisible')
         );
 
       const activityTypeMenu = new StringSelectMenuBuilder()
         .setCustomId('select_activity_type')
-        .setPlaceholder('select activity type')
+        .setPlaceholder('Select activity type')
         .addOptions(
-          new StringSelectMenuOptionBuilder().setLabel('Играет').setValue('Playing'),
-          new StringSelectMenuOptionBuilder().setLabel('Смотрит').setValue('Watching'),
-          new StringSelectMenuOptionBuilder().setLabel('Слушает').setValue('Listening'),
-          new StringSelectMenuOptionBuilder().setLabel('Стримит').setValue('Streaming')
+          new StringSelectMenuOptionBuilder().setLabel('Playing').setValue('Playing'),
+          new StringSelectMenuOptionBuilder().setLabel('Watching').setValue('Watching'),
+          new StringSelectMenuOptionBuilder().setLabel('Listening').setValue('Listening'),
+          new StringSelectMenuOptionBuilder().setLabel('Streaming').setValue('Streaming')
         );
 
       const emojiMenu = new StringSelectMenuBuilder()
         .setCustomId('select_emoji')
-        .setPlaceholder('select emoji')
+        .setPlaceholder('Select emoji')
         .addOptions(
-          new StringSelectMenuOptionBuilder().setLabel('🟢').setValue('🟢'),
-          new StringSelectMenuOptionBuilder().setLabel('🔴').setValue('🔴'),
-          new StringSelectMenuOptionBuilder().setLabel('🟡').setValue('🟡'),
-          new StringSelectMenuOptionBuilder().setLabel('⚫').setValue('⚫')
+          new StringSelectMenuOptionBuilder().setLabel('Green').setValue('🟢'),
+          new StringSelectMenuOptionBuilder().setLabel('Red').setValue('🔴'),
+          new StringSelectMenuOptionBuilder().setLabel('Yellow').setValue('🟡'),
+          new StringSelectMenuOptionBuilder().setLabel('Black').setValue('⚫')
         );
 
       const applyButton = new ButtonBuilder()
@@ -281,68 +307,11 @@ client.on('interactionCreate', async (interaction) => {
       const row4 = new ActionRowBuilder().addComponents(applyButton);
 
       await interaction.reply({
-        content: formatAdminSettings(interaction.client.adminSettings.get(interaction.user.id)),
+        content: formatAdminSettings(settings),
         components: [row1, row2, row3, row4],
-        flags: 64,
+        ephemeral: true,
       });
     }
-  }
-
-  // Handle custom message ID modal for /lame
-  if (interaction.isModalSubmit() && interaction.customId === 'custom_message_id') {
-    const messageId = interaction.fields.getTextInputValue('message_id');
-
-    if (!/^\d{17,19}$/.test(messageId)) {
-      await interaction.reply({
-        content: 'Error: incorrect ID!',
-        flags: 64,
-      });
-      return;
-    }
-
-    interaction.client.floodSettings = interaction.client.floodSettings || new Map();
-    interaction.client.floodSettings.set(interaction.user.id, {
-      text: interaction.message?.interaction?.options?.getString('text') || 'Неизвестно',
-      replyTo: 'custom',
-      customMessageId: messageId,
-      delay: null,
-      count: null,
-      channelId: interaction.channelId,
-      interactionToken: interaction.token,
-    });
-
-    const delayMenu = new StringSelectMenuBuilder()
-      .setCustomId('select_delay')
-      .setPlaceholder('Select delay')
-      .addOptions(
-        new StringSelectMenuOptionBuilder().setLabel('1s').setValue('1000'),
-        new StringSelectMenuOptionBuilder().setLabel('2s').setValue('2000'),
-        new StringSelectMenuOptionBuilder().setLabel('5s').setValue('5000')
-      );
-
-    const countMenu = new StringSelectMenuBuilder()
-      .setCustomId('select_count')
-      .setPlaceholder('Select count')
-      .addOptions(
-        new StringSelectMenuOptionBuilder().setLabel('1').setValue('1'),
-        new StringSelectMenuOptionBuilder().setLabel('3').setValue('3'),
-        new StringSelectMenuOptionBuilder().setLabel('5').setValue('5')
-      );
-
-    const startButton = new ButtonBuilder()
-      .setCustomId('start_flood')
-      .setLabel('Start Fl00d')
-      .setStyle(ButtonStyle.Primary);
-
-    const row1 = new ActionRowBuilder().addComponents(delayMenu);
-    const row2 = new ActionRowBuilder().addComponents(countMenu);
-    const row3 = new ActionRowBuilder().addComponents(startButton);
-
-    await interaction.reply({
-      content: formatSettings(interaction.client.floodSettings.get(interaction.user.id)),
-      components: [row1, row2, row3],
-      flags: 64,
-    });
   }
 
   // Handle activity text modal for /admin
@@ -350,22 +319,23 @@ client.on('interactionCreate', async (interaction) => {
     if (!adminList.has(interaction.user.id)) return;
     const activityText = interaction.fields.getTextInputValue('activity_text');
 
-    const settings = interaction.client.adminSettings.get(interaction.user.id);
+    const settings = client.adminSettings.get(interaction.user.id);
     settings.activityText = activityText;
+    await updateAdminSettings(interaction.user.id, settings);
 
     const statusMenu = new StringSelectMenuBuilder()
       .setCustomId('select_status')
-      .setPlaceholder('Status')
+      .setPlaceholder('Select status')
       .addOptions(
-        new StringSelectMenuOptionBuilder().setLabel('online').setValue('online'),
-        new StringSelectMenuOptionBuilder().setLabel('offline').setValue('offline'),
-        new StringSelectMenuOptionBuilder().setLabel('dnd').setValue('dnd'),
-        new StringSelectMenuOptionBuilder().setLabel('invisible').setValue('invisible')
+        new StringSelectMenuOptionBuilder().setLabel('Online').setValue('online'),
+        new StringSelectMenuOptionBuilder().setLabel('Offline').setValue('offline'),
+        new StringSelectMenuOptionBuilder().setLabel('Do Not Disturb').setValue('dnd'),
+        new StringSelectMenuOptionBuilder().setLabel('Invisible').setValue('invisible')
       );
 
     const activityTypeMenu = new StringSelectMenuBuilder()
       .setCustomId('select_activity_type')
-      .setPlaceholder('Activity select')
+      .setPlaceholder('Select activity type')
       .addOptions(
         new StringSelectMenuOptionBuilder().setLabel('Playing').setValue('Playing'),
         new StringSelectMenuOptionBuilder().setLabel('Watching').setValue('Watching'),
@@ -377,10 +347,10 @@ client.on('interactionCreate', async (interaction) => {
       .setCustomId('select_emoji')
       .setPlaceholder('Select emoji')
       .addOptions(
-        new StringSelectMenuOptionBuilder().setLabel('🟢').setValue('🟢'),
-        new StringSelectMenuOptionBuilder().setLabel('🔴').setValue('🔴'),
-        new StringSelectMenuOptionBuilder().setLabel('🟡').setValue('🟡'),
-        new StringSelectMenuOptionBuilder().setLabel('⚫').setValue('⚫')
+        new StringSelectMenuOptionBuilder().setLabel('Green').setValue('🟢'),
+        new StringSelectMenuOptionBuilder().setLabel('Red').setValue('🔴'),
+        new StringSelectMenuOptionBuilder().setLabel('Yellow').setValue('🟡'),
+        new StringSelectMenuOptionBuilder().setLabel('Black').setValue('⚫')
       );
 
     const applyButton = new ButtonBuilder()
@@ -396,33 +366,35 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.reply({
       content: formatAdminSettings(settings),
       components: [row1, row2, row3, row4],
-      flags: 64,
+      ephemeral: true,
     });
   }
 
   // Handle delay selection for /lame
   if (interaction.isStringSelectMenu() && interaction.customId === 'select_delay') {
     const delay = parseInt(interaction.values[0]);
-    const settings = interaction.client.floodSettings.get(interaction.user.id);
+    const settings = client.floodSettings.get(interaction.user.id);
     settings.delay = delay;
+    await updateFloodSettings(interaction.user.id, settings);
 
     await interaction.update({
       content: formatSettings(settings),
       components: interaction.message.components,
-      flags: 64,
+      ephemeral: true,
     });
   }
 
   // Handle count selection for /lame
   if (interaction.isStringSelectMenu() && interaction.customId === 'select_count') {
     const count = parseInt(interaction.values[0]);
-    const settings = interaction.client.floodSettings.get(interaction.user.id);
+    const settings = client.floodSettings.get(interaction.user.id);
     settings.count = count;
+    await updateFloodSettings(interaction.user.id, settings);
 
     await interaction.update({
       content: formatSettings(settings),
       components: interaction.message.components,
-      flags: 64,
+      ephemeral: true,
     });
   }
 
@@ -430,13 +402,14 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isStringSelectMenu() && interaction.customId === 'select_status') {
     if (!adminList.has(interaction.user.id)) return;
     const status = interaction.values[0];
-    const settings = interaction.client.adminSettings.get(interaction.user.id);
+    const settings = client.adminSettings.get(interaction.user.id);
     settings.status = status;
+    await updateAdminSettings(interaction.user.id, settings);
 
     await interaction.update({
       content: formatAdminSettings(settings),
       components: interaction.message.components,
-      flags: 64,
+      ephemeral: true,
     });
   }
 
@@ -444,18 +417,19 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isStringSelectMenu() && interaction.customId === 'select_activity_type') {
     if (!adminList.has(interaction.user.id)) return;
     const activityType = interaction.values[0];
-    const settings = interaction.client.adminSettings.get(interaction.user.id);
+    const settings = client.adminSettings.get(interaction.user.id);
     settings.activityType = activityType;
+    await updateAdminSettings(interaction.user.id, settings);
 
     const modal = new ModalBuilder()
       .setCustomId('activity_text_modal')
-      .setTitle('Text');
+      .setTitle('Activity Text');
 
     const textInput = new TextInputBuilder()
       .setCustomId('activity_text')
-      .setLabel('Text')
+      .setLabel('Activity text')
       .setStyle(TextInputStyle.Short)
-      .setPlaceholder('Activity text')
+      .setPlaceholder('Enter activity text')
       .setRequired(true);
 
     const row = new ActionRowBuilder().addComponents(textInput);
@@ -468,26 +442,27 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isStringSelectMenu() && interaction.customId === 'select_emoji') {
     if (!adminList.has(interaction.user.id)) return;
     const emoji = interaction.values[0];
-    const settings = interaction.client.adminSettings.get(interaction.user.id);
+    const settings = client.adminSettings.get(interaction.user.id);
     settings.emoji = emoji;
+    await updateAdminSettings(interaction.user.id, settings);
 
     await interaction.update({
       content: formatAdminSettings(settings),
       components: interaction.message.components,
-      flags: 64,
+      ephemeral: true,
     });
   }
 
   // Handle apply settings for /admin
   if (interaction.isButton() && interaction.customId === 'apply_admin_settings') {
     if (!adminList.has(interaction.user.id)) return;
-    const settings = interaction.client.adminSettings.get(interaction.user.id);
+    const settings = client.adminSettings.get(interaction.user.id);
 
     if (!settings.status || !settings.activityType || !settings.activityText || !settings.emoji) {
       await interaction.update({
-        content: `${formatAdminSettings(settings)}\nError: edit all settings!`,
+        content: `${formatAdminSettings(settings)}\nError: Please select all settings!`,
         components: interaction.message.components,
-        flags: 64,
+        ephemeral: true,
       });
       return;
     }
@@ -502,95 +477,94 @@ client.on('interactionCreate', async (interaction) => {
 
       client.user.setPresence({
         status: settings.status,
-        activities: [
-          {
-            name: `${settings.emoji} ${settings.activityText}`,
-            type: activityTypes[settings.activityType],
-          },
-        ],
+        activities: [{ name: `${settings.emoji} ${settings.activityText}`, type: activityTypes[settings.activityType] }],
       });
 
       await interaction.update({
-        content: `${formatAdminSettings(settings)}\nSettings applied`,
+        content: `${formatAdminSettings(settings)}\nSettings applied successfully`,
         components: [],
-        flags: 64,
+        ephemeral: true,
       });
     } catch (error) {
       await interaction.update({
         content: `${formatAdminSettings(settings)}\nError: ${error.message}`,
         components: interaction.message.components,
-        flags: 64,
-      });
-    }
-
-    interaction.client.adminSettings.delete(interaction.user.id);
-  }
-
-  // Handle flood start for /lame
-  if (interaction.isButton() && interaction.customId === 'start_flood') {
-    const settings = interaction.client.floodSettings.get(interaction.user.id);
-
-    if (!settings.delay || !settings.count) {
-      await interaction.update({
-        content: `${formatSettings(settings)}\nError, choose settings!`,
-        components: interaction.message.components,
-        flags: 64,
+        ephemeral: true,
       });
       return;
     }
 
-    const { text, delay, count, replyTo, customMessageId, channelId, interactionToken } = settings;
+    client.adminSettings.delete(interaction.user.id);
+    await saveSettings(adminSettingsFile, Object.fromEntries(client.adminSettings));
+  }
+
+  // Handle flood start for /lame
+  if (interaction.isButton() && interaction.customId === 'start_flood') {
+    const settings = client.floodSettings.get(interaction.user.id);
+
+    if (!settings.delay || !settings.count) {
+      await interaction.update({
+        content: `${formatSettings(settings)}\nError: Please select all settings!`,
+        components: interaction.message.components,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const { text, delay, count, replyTo, channelId, interactionToken } = settings;
 
     await interaction.update({
       content: `${formatSettings(settings)}\nSpamming...`,
       components: [],
-      flags: 64,
+      ephemeral: true,
     });
 
-    let replyMessageId = replyTo === 'invisible' ? interaction.message.id : customMessageId;
-
-    let sentCount = 0;
     const rest = new REST({ version: '10' }).setToken(TOKEN);
+    let sentCount = 0;
+    let followUpCount = 0;
+    const replyMessageId = interaction.message.id; // Always invisible
 
-    for (let i = 0; i < count; i++) {
+    // Parallel message sending
+    const sendBatch = async (batch) => {
+      const promises = batch.map(() => sendMessage(rest, interactionToken, channelId, text, replyMessageId));
+      const results = await Promise.all(promises);
+      return results.filter((success) => success).length;
+    };
+
+    // Split into batches to avoid overwhelming API
+    const batchSize = 5;
+    for (let i = 0; i < count; i += batchSize) {
+      const batchCount = Math.min(batchSize, count - i);
+      const batch = Array(batchCount).fill(null);
       try {
-        await rest.post(Routes.webhook(CLIENT_ID, interactionToken), {
-          body: {
-            content: text,
-            message_reference: replyMessageId
-              ? {
-                  message_id: replyMessageId,
-                  channel_id: channelId,
-                  fail_if_not_exists: false,
-                }
-              : undefined,
-            flags: 0,
-          },
-        });
-        sentCount++;
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      } catch (error) {
-        console.error('Error:', error);
-        if (error.code === 429) {
-          const retryAfter = error.retry_after || 1000;
-          await new Promise((resolve) => setTimeout(resolve, retryAfter));
-          i--;
-          continue;
+        sentCount += await sendBatch(batch);
+        if (delay >= 500) {
+          await new Promise((resolve) => setTimeout(resolve, delay * batchCount));
         }
-        await interaction.followUp({
-          content: `${formatSettings(settings)}\nError: ${error.message}`,
-          flags: 64,
-        });
+      } catch (error) {
+        console.error('Error in batch:', error);
+        if (followUpCount < 5) {
+          await interaction.followUp({
+            content: `${formatSettings(settings)}\nError: ${error.message}`,
+            ephemeral: true,
+          });
+          followUpCount++;
+        }
         break;
       }
     }
 
-    await interaction.followUp({
-      content: `${formatSettings(settings)}\nSpam end: sended ${sentCount} messages`,
-      flags: 64,
-    });
+    if (followUpCount < 5) {
+      await interaction.followUp({
+        content: `${formatSettings(settings)}\nSpam completed: Sent ${sentCount} messages`,
+        ephemeral: true,
+      });
+    } else {
+      console.log('Follow-up limit reached, skipping completion message');
+    }
 
-    interaction.client.floodSettings.delete(interaction.user.id);
+    client.floodSettings.delete(interaction.user.id);
+    await saveSettings(floodSettingsFile, Object.fromEntries(client.floodSettings));
   }
 });
 
