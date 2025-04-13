@@ -14,6 +14,7 @@ const {
   REST,
   Routes,
   ActivityType,
+  EmbedBuilder,
 } = require('discord.js');
 const fs = require('fs-extra');
 
@@ -41,6 +42,7 @@ if (!TOKEN || !CLIENT_ID) {
 // Settings storage
 const floodSettingsFile = './floodSettings.json';
 const adminSettingsFile = './adminSettings.json';
+const logFile = './zeroLogs.json';
 
 const loadSettings = async (file) => {
   try {
@@ -68,13 +70,45 @@ const updateAdminSettings = async (userId, settings) => {
   await saveSettings(adminSettingsFile, Object.fromEntries(client.adminSettings));
 };
 
-// Format settings with custom emoji
-const formatSettings = (settings) => {
-  return `<:zerotiss:1360564817907421324> Settings:\n       Text: ${settings.text || 'Not selected'}\n       Delay: ${
-    settings.delay ? settings.delay / 1000 : 'Not selected'
-  } s\n       Count: ${settings.count || 'Not selected'}\n       Where: ${settings.where || 'Not selected'}${
-    settings.where === 'dms' ? `\n       User ID: ${settings.userId || 'Not selected'}` : ''
-  }`;
+// Логирование спама
+const logSpam = async (userId, channelId, guildId) => {
+  const log = {
+    timestamp: new Date().toISOString(),
+    from: userId,
+    to: channelId,
+    in: guildId || 'DMs',
+  };
+  const logs = await loadSettings(logFile);
+  logs.logs = logs.logs || [];
+  logs.logs.push(log);
+  await saveSettings(logFile, logs);
+};
+
+// Форматирование настроек для эмбеда
+const formatSettingsEmbed = (settings) => {
+  const fields = [
+    { name: 'Text', value: settings.text || 'Not selected', inline: true },
+    { name: 'Delay', value: settings.delay ? `${settings.delay / 1000}s` : 'Not selected', inline: true },
+    { name: 'Count', value: settings.count ? `${settings.count}` : 'Not selected', inline: true },
+    { name: 'Where', value: settings.where || 'Not selected', inline: true },
+  ];
+
+  if (settings.where === 'dms') {
+    fields.push({ name: 'User ID', value: settings.userId || 'Not selected', inline: true });
+  }
+  if (settings.embedTitle) {
+    fields.push({ name: 'Embed Title', value: settings.embedTitle || 'Not set', inline: true });
+  }
+  if (settings.embedDescription) {
+    fields.push({ name: 'Embed Description', value: settings.embedDescription || 'Not set', inline: true });
+  }
+
+  return new EmbedBuilder()
+    .setColor(settings.color || 0x0099ff)
+    .setTitle('📬 Spam Settings')
+    .setDescription('Edit your settings here')
+    .addFields(fields)
+    .setFooter({ text: 'Zero.Lame | Settings menu' });
 };
 
 const formatAdminSettings = (settings) => {
@@ -87,7 +121,6 @@ const formatAdminSettings = (settings) => {
 
 // Create DM channel for a user
 const createDMChannel = async (rest, userId, client) => {
-  // Попробовать через авторизованные приложения (REST API)
   try {
     console.log(`Attempting to create DM channel via REST API for user ${userId}`);
     const dmChannel = await rest.post(Routes.userChannels(), {
@@ -101,7 +134,6 @@ const createDMChannel = async (rest, userId, client) => {
     console.error(`Error code: ${error.code}, message: ${error.message}`);
   }
 
-  // Попробовать через общий сервер
   try {
     console.log(`Checking guilds for user ${userId}`);
     for (const guild of client.guilds.cache.values()) {
@@ -117,7 +149,6 @@ const createDMChannel = async (rest, userId, client) => {
     console.error(`Server DM creation failed for user ${userId}:`, error);
   }
 
-  // Попробовать через client.users.fetch как запасной вариант
   try {
     console.log(`Attempting to fetch user ${userId} directly`);
     const user = await client.users.fetch(userId);
@@ -129,16 +160,16 @@ const createDMChannel = async (rest, userId, client) => {
     console.error(`User fetch DM creation failed for user ${userId}:`, error);
   }
 
-  // Если все методы не сработали
   throw new Error('User not found or message cannot be delivered.');
 };
 
 // Optimized async message sending for chat
-const sendMessage = async (rest, interactionToken, channelId, content, replyMessageId) => {
+const sendMessage = async (rest, interactionToken, channelId, content, replyMessageId, embed) => {
   try {
     await rest.post(Routes.webhook(CLIENT_ID, interactionToken), {
       body: {
-        content,
+        content: embed ? undefined : content,
+        embeds: embed ? [embed] : undefined,
         message_reference: replyMessageId
           ? { message_id: replyMessageId, channel_id: channelId, fail_if_not_exists: false }
           : undefined,
@@ -157,11 +188,14 @@ const sendMessage = async (rest, interactionToken, channelId, content, replyMess
 };
 
 // Message sending for DMs
-const sendMessageDM = async (rest, channelId, content) => {
+const sendMessageDM = async (rest, channelId, content, embed) => {
   if (!channelId) throw new Error('Channel ID is undefined');
   try {
     await rest.post(Routes.channelMessages(channelId), {
-      body: { content },
+      body: {
+        content: embed ? undefined : content,
+        embeds: embed ? [embed] : undefined,
+      },
     });
     return true;
   } catch (error) {
@@ -196,6 +230,15 @@ client.once('ready', async () => {
           { name: 'Chat', value: 'chat' },
           { name: 'DMs', value: 'dms' }
         )
+    )
+    .addStringOption((option) =>
+      option.setName('embed_title').setDescription('Title for embed (optional)').setRequired(false)
+    )
+    .addStringOption((option) =>
+      option.setName('embed_description').setDescription('Description for embed (optional)').setRequired(false)
+    )
+    .addStringOption((option) =>
+      option.setName('embed_color').setDescription('Hex color for embed (e.g., #FF0000)').setRequired(false)
     );
 
   const adminCommand = new SlashCommandBuilder()
@@ -215,10 +258,16 @@ client.once('ready', async () => {
       subcommand.setName('settings').setDescription('Change bot status')
     );
 
+  const logsCommand = new SlashCommandBuilder()
+    .setName('logs')
+    .setDescription('View spam logs (admin only)')
+    .setIntegrationTypes([1]) // User Install
+    .setDefaultMemberPermissions(0);
+
   const rest = new REST({ version: '10' }).setToken(TOKEN);
   try {
     await rest.put(Routes.applicationCommands(CLIENT_ID), {
-      body: [floodCommand.toJSON(), adminCommand.toJSON()],
+      body: [floodCommand.toJSON(), adminCommand.toJSON(), logsCommand.toJSON()],
     });
     console.log('Slash commands registered successfully');
   } catch (error) {
@@ -228,7 +277,7 @@ client.once('ready', async () => {
   }
 });
 
-// Show settings menu
+// Show settings menu with embed
 const showSettingsMenu = async (interaction, settings) => {
   const delayMenu = new StringSelectMenuBuilder()
     .setCustomId('select_delay')
@@ -250,7 +299,7 @@ const showSettingsMenu = async (interaction, settings) => {
       new StringSelectMenuOptionBuilder().setLabel('2').setValue('2'),
       new StringSelectMenuOptionBuilder().setLabel('3').setValue('3'),
       new StringSelectMenuOptionBuilder().setLabel('4').setValue('4'),
-      new StringSelectMenuOptionBuilder().setLabel('5').setValue('5'),
+      new StringSelectMenuOptionBuilder().setLabel('5').setValue('5')
     );
 
   const startButton = new ButtonBuilder()
@@ -263,7 +312,7 @@ const showSettingsMenu = async (interaction, settings) => {
   const row3 = new ActionRowBuilder().addComponents(startButton);
 
   await interaction.reply({
-    content: formatSettings(settings),
+    embeds: [formatSettingsEmbed(settings)],
     components: [row1, row2, row3],
     flags: 1 << 6, // Ephemeral
   });
@@ -283,6 +332,9 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isCommand() && interaction.commandName === 'lame') {
     const text = interaction.options.getString('text');
     const where = interaction.options.getString('where');
+    const embedTitle = interaction.options.getString('embed_title');
+    const embedDescription = interaction.options.getString('embed_description');
+    const embedColor = interaction.options.getString('embed_color');
 
     let settings = client.floodSettings.get(interaction.user.id) || {
       delay: null,
@@ -290,6 +342,9 @@ client.on('interactionCreate', async (interaction) => {
       userId: null,
       where: null,
       text: null,
+      embedTitle: null,
+      embedDescription: null,
+      color: null,
     };
 
     settings = {
@@ -299,6 +354,10 @@ client.on('interactionCreate', async (interaction) => {
       replyTo: where === 'chat' ? 'invisible' : null,
       channelId: where === 'chat' ? interaction.channelId : null,
       interactionToken: interaction.token,
+      embedTitle,
+      embedDescription,
+      color: embedColor ? parseInt(embedColor.replace('#', ''), 16) : null,
+      guildId: interaction.guildId, // Для логов
     };
 
     await updateFloodSettings(interaction.user.id, settings);
@@ -448,6 +507,40 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
+  // Handle /logs command
+  if (interaction.isCommand() && interaction.commandName === 'logs') {
+    if (!adminList.has(interaction.user.id)) {
+      await interaction.reply({
+        content: 'Error: No access!',
+        flags: 1 << 6, // Ephemeral
+      });
+      return;
+    }
+
+    const logs = await loadSettings(logFile);
+    const logEntries = logs.logs || [];
+    if (logEntries.length === 0) {
+      await interaction.reply({
+        content: 'No spam logs found.',
+        flags: 1 << 6, // Ephemeral
+      });
+      return;
+    }
+
+    const logText = logEntries
+      .slice(-10) // Показываем последние 10 логов
+      .map(
+        (log) =>
+          `Zero.Logs\nStarted Spam from: ${log.from}\nSpam to: ${log.to}\nSpam in: ${log.in}\nTimestamp: ${log.timestamp}`
+      )
+      .join('\n\n');
+
+    await interaction.reply({
+      content: logText || 'No recent logs.',
+      flags: 1 << 6, // Ephemeral
+    });
+  }
+
   // Handle activity text modal for /admin
   if (interaction.isModalSubmit() && interaction.customId === 'activity_text_modal') {
     if (!adminList.has(interaction.user.id)) return;
@@ -519,7 +612,7 @@ client.on('interactionCreate', async (interaction) => {
     await updateFloodSettings(interaction.user.id, settings);
 
     await interaction.update({
-      content: formatSettings(settings),
+      embeds: [formatSettingsEmbed(settings)],
       components: interaction.message.components,
       flags: 1 << 6, // Ephemeral
     });
@@ -540,7 +633,7 @@ client.on('interactionCreate', async (interaction) => {
     await updateFloodSettings(interaction.user.id, settings);
 
     await interaction.update({
-      content: formatSettings(settings),
+      embeds: [formatSettingsEmbed(settings)],
       components: interaction.message.components,
       flags: 1 << 6, // Ephemeral
     });
@@ -659,7 +752,7 @@ client.on('interactionCreate', async (interaction) => {
 
     if (!settings.delay || !settings.count) {
       await interaction.update({
-        content: `${formatSettings(settings)}\nError: Please select all settings!`,
+        embeds: [formatSettingsEmbed(settings).setDescription('Error: Please select all settings!')],
         components: interaction.message.components,
         flags: 1 << 6, // Ephemeral
       });
@@ -668,20 +761,29 @@ client.on('interactionCreate', async (interaction) => {
 
     if (settings.where === 'dms' && !settings.userId) {
       await interaction.update({
-        content: `${formatSettings(settings)}\nError: User ID is required for DMs!`,
+        embeds: [formatSettingsEmbed(settings).setDescription('Error: User ID is required for DMs!')],
         components: [],
         flags: 1 << 6, // Ephemeral
       });
       return;
     }
 
-    const { text, delay, count, where, userId, channelId: initialChannelId, interactionToken } = settings;
+    const { text, delay, count, where, userId, channelId: initialChannelId, interactionToken, embedTitle, embedDescription, color, guildId } = settings;
     let channelId = initialChannelId;
     let replyMessageId = where === 'chat' ? interaction.message.id : null;
 
     const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-    // For DMs, create or get DM channel for the specified user
+    // Создание эмбеда, если указаны параметры
+    let embed = null;
+    if (embedTitle || embedDescription) {
+      embed = new EmbedBuilder()
+        .setColor(color || 0x0099ff)
+        .setTitle(embedTitle || null)
+        .setDescription(embedDescription || text);
+    }
+
+    // For DMs, create or get DM channel
     if (where === 'dms') {
       try {
         channelId = await createDMChannel(rest, userId, client);
@@ -689,7 +791,7 @@ client.on('interactionCreate', async (interaction) => {
         await updateFloodSettings(interaction.user.id, settings);
       } catch (error) {
         await interaction.update({
-          content: `${formatSettings(settings)}\nError: ${error.message}`,
+          embeds: [formatSettingsEmbed(settings).setDescription(`Error: ${error.message}`)],
           components: [],
           flags: 1 << 6, // Ephemeral
         });
@@ -697,8 +799,11 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
+    // Логирование начала спама
+    await logSpam(interaction.user.id, channelId, guildId);
+
     await interaction.update({
-      content: `${formatSettings(settings)}\nSpamming...`,
+      embeds: [formatSettingsEmbed(settings).setDescription('Spamming...')],
       components: [],
       flags: 1 << 6, // Ephemeral
     });
@@ -706,43 +811,38 @@ client.on('interactionCreate', async (interaction) => {
     let sentCount = 0;
     let followUpCount = 0;
 
-    // Parallel message sending
+    // Parallel message sending (ограничено 5 follow-ups)
     const sendBatch = async (batch) => {
       const promises = batch.map(() =>
         where === 'chat'
-          ? sendMessage(rest, interactionToken, channelId, text, replyMessageId)
-          : sendMessageDM(rest, channelId, text)
+          ? sendMessage(rest, interactionToken, channelId, text, replyMessageId, embed)
+          : sendMessageDM(rest, channelId, text, embed)
       );
       const results = await Promise.all(promises);
       return results.filter((success) => success).length;
     };
 
-    // Split into batches to avoid overwhelming API
-    const batchSize = 5;
-    for (let i = 0; i < count; i += batchSize) {
-      const batchCount = Math.min(batchSize, count - i);
-      const batch = Array(batchCount).fill(null);
-      try {
-        sentCount += await sendBatch(batch);
-        if (delay >= 500) {
-          await new Promise((resolve) => setTimeout(resolve, delay * batchCount));
-        }
-      } catch (error) {
-        console.error('Error in batch:', error);
-        if (followUpCount < 5) {
-          await interaction.followUp({
-            content: `${formatSettings(settings)}\nError: ${error.message}`,
-            flags: 1 << 6, // Ephemeral
-          });
-          followUpCount++;
-        }
-        break;
+    // Ограничение до 5 сообщений
+    const maxMessages = Math.min(count, 5);
+    try {
+      sentCount += await sendBatch(Array(maxMessages).fill(null));
+      if (delay >= 500) {
+        await new Promise((resolve) => setTimeout(resolve, delay * maxMessages));
+      }
+    } catch (error) {
+      console.error('Error in batch:', error);
+      if (followUpCount < 5) {
+        await interaction.followUp({
+          embeds: [formatSettingsEmbed(settings).setDescription(`Error: ${error.message}`)],
+          flags: 1 << 6, // Ephemeral
+        });
+        followUpCount++;
       }
     }
 
     if (followUpCount < 5) {
       await interaction.followUp({
-        content: `${formatSettings(settings)}\nSpam completed: Sent ${sentCount} messages`,
+        embeds: [formatSettingsEmbed(settings).setDescription(`Spam completed: Sent ${sentCount} messages`)],
         flags: 1 << 6, // Ephemeral
       });
     } else {
