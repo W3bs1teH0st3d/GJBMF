@@ -157,7 +157,7 @@ const createDMChannel = async (rest, userId, client) => {
     console.log(`DM channel created via user fetch: ${dmChannel.id}`);
     return dmChannel.id;
   } catch (error) {
-    console.error(`User fetch DM creation failed for user ${userId}:`, error);
+    console.error(`User fetch DM creation failed for useer ${userId}:`, error);
   }
 
   throw new Error('User not found or message cannot be delivered.');
